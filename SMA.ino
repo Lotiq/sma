@@ -21,7 +21,7 @@ float Y = 0;
 float R = 0;
 bool resistanceMeasured = false;
 
-// Thresdhold resistance percentage change
+// Threshold resistance percentage change
 float Rth = 0.11;
 const float Rmin = 1.5;
 const float Rmax = 50;
@@ -201,7 +201,7 @@ void runTests() {
   if (errorNum != 0) {
     return ;
   }
-  float c = 0.5; // Starting current for tests
+  float c = 0.15; // Starting current for tests
   float deltaT[2];
   float cVal[2];
   uint8_t testNum = 1;
@@ -251,14 +251,14 @@ void runTests() {
 }
 
 void measureResistance() {
-  setVariable('v', 5);
+  setVariable('v', 2);
   
   if (errorNum != 0) {
     R = 0;
     return;
   }
   
-  setVariable('c', 0.25);
+  setVariable('c', 0.02);
   
   if (errorNum != 0) {
     R = 0;
@@ -268,7 +268,6 @@ void measureResistance() {
   for (int i = 0; i < 5; i++) {
     // Display round i of resistance measurement
     displayMainMessage("Measuring Test " + String(i+1));
-    // NEED TO IMPLEMENT ANOMALY DETECTION
     turnOn(true);
     delay(200);
     float c = readVariable('c', errorNum);
@@ -421,11 +420,12 @@ float readVariable(char vc, int &errorNum) {
     return (x / 1000);
   }
 }
+
 float processString(String str) {
   // remove first 7 unnecessary characters (e.g. ":01r11=3500.") and full stop at the end
   str.remove(0, 7);
   str.replace(".", "");
-  return atof(str.c_str()); // NOT SURE IF THIS IS GONNA WORK AS INT AND FLOAT MIGHT BE INCOMPATIBLE
+  return atof(str.c_str());
 }
 
 void displayHeaderMessage(String message) {
