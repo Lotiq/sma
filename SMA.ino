@@ -1,17 +1,19 @@
-#include <SPI.h>
-#include <Adafruit_GFX.h>
+#include <DPM_8605.h>
 #include <Adafruit_SSD1306.h>
-#include <Wire.h>
+
 
 #define leftButtonPin 8
 #define rightButtonPin 12
 #define timeSettingKnob A0
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define Current false
+#define Voltage true
 
 // Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
 #define OLED_RESET 4
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+DPM_8605 converter;
 
 // constants in I^2 = (X/t) + Y
 float X = 0;
@@ -22,7 +24,7 @@ float R = 0;
 bool resistanceMeasured = false;
 
 // Threshold resistance percentage change
-float Rth = 0.11;
+float Rth = 0.07;
 const float Rmin = 1.5;
 const float Rmax = 50;
 
@@ -36,7 +38,7 @@ bool testsCompleted = false;
 bool errorDisp = false;
 
 // Error State
-int errorNum = 0;
+int8_t errorNum = 0;
 // 101 - data not recieved when sending.
 // 102 - variables not set when sending
 // 103 - maximum current reached for tests.
@@ -48,7 +50,7 @@ int errorNum = 0;
 
 void setup() {
   Serial.begin(9600); // Change that number if communication rate is different
-
+  converter.begin(Serial, 3);
   pinMode(leftButtonPin, INPUT);
   pinMode(rightButtonPin, INPUT);
   
@@ -124,7 +126,7 @@ void readyForActivation() {
 }
 
 bool activate(float c, float &t) {
-  setVariable('c', c);
+  converter.write(Current, c, errorNum);
   if (errorNum != 0) {
     return false;
   }
@@ -133,17 +135,18 @@ bool activate(float c, float &t) {
   unsigned long timeStamp = millis();
 
   // Turn on the power
-  turnOn(true);
+  converter.power(true, errorNum);
+  
   if (errorNum != 0) {
     return false;
   }
   
   delay(150);
   // Measure voltage
-  float v = readVariable('v', errorNum);
+  float v = converter.read(Voltage, errorNum);
 
   if (errorNum != 0) {
-    turnOn(false);
+    converter.power(false, errorNum);
     return false;
   }
 
@@ -155,7 +158,7 @@ bool activate(float c, float &t) {
 
   // Run a while loop which will only be exited if time exceeds t+1 seconds or resistance drops low enough
   while ((r > rinit * (1 - Rth)) && (millis() - timeStamp < ((t + 1) * 1000))) {
-    v = readVariable('v', errorNum);
+    v = converter.read(Voltage, errorNum);
     // NEED TO IMPLEMENT ANOMALY  AND SLOPE DETECTION
     if (errorNum != 0) {
       break;
@@ -170,8 +173,8 @@ bool activate(float c, float &t) {
     delay(60);
   }
   // Turn off the power
-  turnOn(false);
-
+  converter.power(false, errorNum);
+  
   if (errorNum != 0) {
     return false;
   }
@@ -189,14 +192,14 @@ void runTests() {
   float setV = R * 5;
   if (setV > 60) {
     displayMainMessage(F("Maximum Voltage. Be aware!"));
-    setVariable('v', 60);
+    converter.write(Voltage, 60, errorNum);
     delay(5000);
   } else if (setV > 12) {
     displayMainMessage(F("High Voltage. Be aware!"));
-    setVariable('v', setV);
+    converter.write(Voltage, setV, errorNum);
     delay(5000);
   } else {
-    setVariable('v', setV);
+    converter.write(Voltage, setV, errorNum);
   }
   if (errorNum != 0) {
     return ;
@@ -251,14 +254,13 @@ void runTests() {
 }
 
 void measureResistance() {
-  setVariable('v', 2);
-  
+  converter.write(Voltage, 5, errorNum);
   if (errorNum != 0) {
     R = 0;
     return;
   }
-  
-  setVariable('c', 0.02);
+
+  converter.write(Current, 0.15, errorNum);
   
   if (errorNum != 0) {
     R = 0;
@@ -268,17 +270,18 @@ void measureResistance() {
   for (int i = 0; i < 5; i++) {
     // Display round i of resistance measurement
     displayMainMessage("Measuring Test " + String(i+1));
-    turnOn(true);
+    converter.power(true, errorNum);
     delay(200);
-    float c = readVariable('c', errorNum);
-    float v = readVariable('v', errorNum);
-    turnOn(false);
+    float c = converter.read(Current, errorNum);
+    float v = converter.read(Voltage, errorNum);
+
+    converter.power(false, errorNum);
     if (errorNum != 0) {
       break;
     }
     displaySubmainMessage("C=" + String(c) + ",V="+ String(v));
     R = R + (v / c);
-    delay(3000); // 15s for 5 measurements
+    delay(5000); // 15s for 5 measurements
   }
 
   if (errorNum != 0) {
@@ -307,125 +310,6 @@ void measureResistance() {
   display.clearDisplay();
   displayHeaderMessage(F("TESTS"));
   displayMainMessage(F("Starting tests..."));
-}
-
-void serialListen(String &cmd, bool &stringComplete) {
-  unsigned long errorTimer = millis();
-  while ( (!stringComplete) && (millis() - errorTimer) < 200 ) {
-    if (Serial.available()) {
-      char inChar = (char)Serial.read();
-      if (inChar == '\n') {
-        stringComplete = true;
-      } else {
-        cmd += inChar;
-      }
-    }
-  }
-}
-
-void turnOn(bool on) {
-
-  int retries = 0;
-  String cmd = "";
-  bool stringComplete = false;
-  
-  do {
-    // Send command
-    if (on) {
-      Serial.print(":01w12=1,\r\n");
-    } else {
-      Serial.print(":01w12=0,\r\n");
-    }
-
-    // Listen for reply
-    serialListen(cmd, stringComplete);
-
-    // Add a retry
-    retries += 1;
-    
-  } while ((!stringComplete) && (retries < 2));
-
-  if (!stringComplete) {
-    errorNum = 104; // no response from setting variable
-    return ;
-  }
-  
-  delay(1);
-}
-
-void setVariable(char vc, float value) {
-  int x = 0;
-  String function = "";
-
-  if (vc == 'v' || vc == 'V') {
-    x = floor(value * 100);
-    function = "10";
-  } else {
-    x = floor(value * 1000);
-    function = "11";
-  }
-
-  int retries = 0;
-  String cmd = "";
-  bool stringComplete = false;
-  
-  do {
-    // Send command
-    Serial.print(":01w" + function + "=" + String(x) + ",\r\n");
-
-    // Listen for reply
-    serialListen(cmd, stringComplete);
-
-    // Add a retry
-    retries += 1;
-  } while ((!stringComplete) && (retries < 2));
-
-  if (!stringComplete) {
-    errorNum = 102; // no response from setting variable
-    return ;
-  }
-}
-
-float readVariable(char vc, int &errorNum) {
-  bool stringComplete = false;
-  int retries = 0;
-  String cmd = "";
-
-  do {
-    // Send command
-    if (vc == 'v' || vc == 'V') {
-      Serial.print(F(":01r30=0,\r\n"));
-    } else {
-      Serial.print(F(":01r31=0,\r\n"));
-    }
-
-    // Listen for a reply
-    serialListen(cmd, stringComplete);
-
-    // Add a retry
-    retries += 1;
-
-  } while ((!stringComplete) && (retries < 2)); // Stop running either when data received or 2 attempts happened.
-
-  if (!stringComplete) {
-    errorNum = 101; // data not recieved
-    return 0;
-  }
-
-  float x = processString(cmd);
-
-  if (vc == 'v' || vc == 'V') {
-    return (x / 100);
-  } else {
-    return (x / 1000);
-  }
-}
-
-float processString(String str) {
-  // remove first 7 unnecessary characters (e.g. ":01r11=3500.") and full stop at the end
-  str.remove(0, 7);
-  str.replace(".", "");
-  return atof(str.c_str());
 }
 
 void displayHeaderMessage(String message) {
