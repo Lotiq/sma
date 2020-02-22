@@ -24,7 +24,7 @@ float R = 0;
 bool resistanceMeasured = false;
 
 // Threshold resistance percentage change
-float Rth = 0.07;
+float Rth = 0.09;
 const float Rmin = 1.5;
 const float Rmax = 50;
 
@@ -151,11 +151,12 @@ bool activate(float c, float &t) {
   }
 
   // Calculate Initial Resistance
-  float rinit = (v / c);
+  //float rinit = (v / c);
+  float rinit = R;
 
   // Set changing Resistance to Initial
   float r = rinit;
-
+ 
   // Run a while loop which will only be exited if time exceeds t+1 seconds or resistance drops low enough
   while ((r > rinit * (1 - Rth)) && (millis() - timeStamp < ((t + 1) * 1000))) {
     v = converter.read(Voltage, errorNum);
@@ -189,7 +190,7 @@ bool activate(float c, float &t) {
 
 void runTests() {
   int successfulTestCount = 0;
-  float setV = R * 5;
+  float setV = R * 3;
   if (setV > 60) {
     displayMainMessage(F("Maximum Voltage. Be aware!"));
     converter.write(Voltage, 60, errorNum);
@@ -204,7 +205,7 @@ void runTests() {
   if (errorNum != 0) {
     return ;
   }
-  float c = 0.15; // Starting current for tests
+  float c = 0.25; // Starting current for tests
   float deltaT[2];
   float cVal[2];
   uint8_t testNum = 1;
@@ -229,7 +230,7 @@ void runTests() {
       errorNum = 103;
       break;
     }
-    delay(30000); // 45 sec to cool down
+    delay(40000); // 40 sec to cool down
   }
 
   if (errorNum != 0) {
@@ -266,8 +267,10 @@ void measureResistance() {
     R = 0;
     return;
   }
-  
-  for (int i = 0; i < 5; i++) {
+  float Rarray[7];
+  float Rdevi[7];
+  float Rtot = 0;
+  for (int i = 0; i < 6; i++) {
     // Display round i of resistance measurement
     displayMainMessage("Measuring Test " + String(i+1));
     converter.power(true, errorNum);
@@ -280,7 +283,8 @@ void measureResistance() {
       break;
     }
     displaySubmainMessage("C=" + String(c) + ",V="+ String(v));
-    R = R + (v / c);
+    Rarray[i] = (v / c);
+    Rtot = Rtot + (v / c);
     delay(5000); // 15s for 5 measurements
   }
 
@@ -288,9 +292,29 @@ void measureResistance() {
     R = 0;
     return;
   }
-
-  R = R / 5;
   
+  float Ravg = Rtot / 6;
+  for  (int i = 0; i < 6; i++) {
+    float devi = Rarray[i] - Ravg;
+    if (devi < 0) {devi = -devi;} // Modulus
+    Rdevi[i] = devi;
+  }
+  float Rdeviavg = 0;
+  for (int i = 0; i < 6; i++) {
+    Rdeviavg = Rdeviavg + Rdevi[i];
+  }
+
+  Rdeviavg = Rdeviavg / 6;
+  int k = 0;
+  for (int i = 0; i < 6; i++) {
+    if (Rdevi[i] < 2*Rdeviavg) {
+      k += 1;
+      R = R + Rarray[i];
+    }
+  }
+  R = R / k; // Only counting the non-outliers
+  displayMainMessage("k = " + String(k));
+  delay(3000);
   if (R < Rmin) {
     errorNum = 203;
     R = 0;
