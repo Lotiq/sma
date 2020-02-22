@@ -1,19 +1,10 @@
 #include <DPM_8605.h>
-#include <Adafruit_SSD1306.h>
-
-
-#define leftButtonPin 8
-#define rightButtonPin 12
-#define timeSettingKnob A0
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#include "wiring_private.h"
 #define Current false
 #define Voltage true
 
-// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
-#define OLED_RESET 4
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 DPM_8605 converter;
+Uart dpmSerial (&sercom0, 5, 6, SERCOM_RX_PAD_1, UART_TX_PAD_0);
 
 // constants in I^2 = (X/t) + Y
 float X = 0;
@@ -21,6 +12,7 @@ float Y = 0;
 
 // Wire Resistance
 float R = 0;
+float activationTime = 1;
 bool resistanceMeasured = false;
 
 // Threshold resistance percentage change
@@ -49,28 +41,33 @@ int8_t errorNum = 0;
 // 204 - resistance too high.
 
 void setup() {
-  Serial.begin(9600); // Change that number if communication rate is different
-  converter.begin(Serial, 3);
-  pinMode(leftButtonPin, INPUT);
-  pinMode(rightButtonPin, INPUT);
+  Serial.begin(9600); // Serial that is used for communicating with computer
+  delay(3000);
+  delay(10);
+  pinPeripheral(5, PIO_SERCOM_ALT); // Setting up pin 5 for RX
+  pinPeripheral(6, PIO_SERCOM_ALT); // Setting up pin 6 for TX
+  dpmSerial.begin(9600); // Serial that is passed for communication with DPM8605
+  delay(10);
+
+  converter.begin(dpmSerial, 3); // Starting communication with DPM8605
+  Serial.println("Connected");
+  converter.write(Voltage, 2, errorNum);
+  //dpmSerial.println(":01w10=1000,");
   
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // Initialize display. NEEDS AT LEAST 1024 Bytes in RAM to do that. If lower, will fail
-  display.setTextSize(2);
-  display.setTextColor(WHITE);
-  display.clearDisplay();
-  display.display();
-  
-  // DISPLAY ready to start measuring
-  displayHeaderMessage(F("BEGIN"));
-  displayMainMessage(F("Press LEFT button to begin measurements"));
+  // Ready to start measuring
+  Serial.println(F("Setup is finished. Send S to begin measurements"));
 }
 
 void loop() {
-  if (digitalRead(leftButtonPin) == HIGH && beginMeasurements == false) {
-    beginMeasurements = true;
-    displayHeaderMessage(F("RESISTANCE"));
-    displayMainMessage(F("Starting measuruments..."));
+
+  if (Serial.available() > 0 && !beginMeasurements) {
+    char cmd = Serial.read();
+    if (cmd == 'S') {
+      beginMeasurements = true;
+      Serial.println(F("Start command was received. Starting measurements"));
+    }
   }
+
   // Main Loop State Machine
   if (beginMeasurements && errorNum == 0) {
     if (!resistanceMeasured) {
@@ -83,19 +80,19 @@ void loop() {
   } else if (errorNum != 0) {
     if (!errorDisp) {
       // Display error here only once
-      display.clearDisplay();
-      displayHeaderMessage("ERROR #" + String(errorNum));
+      Serial.println("Error #" + String(errorNum));
+
       if (errorNum == 201 || errorNum == 202) {
-        displayMainMessage(F("Try Again once this message dissapears."));
+        Serial.println(F("Try again in 5 seconds"));
       }
+
       errorDisp = true;
     }
     
     if (errorNum == 201 || errorNum == 202) {
       errorNum = 0;
-      delay(6000);
-      displayHeaderMessage(F("READY"));
-      displayMainMessage(F("Ready for activation. Press right button to activate"));
+      delay(5000);
+      Serial.println(F("Ready for activation. Press right button to activate"));
     }
   }
 
@@ -103,25 +100,37 @@ void loop() {
 
 void readyForActivation() {
 
-  if (digitalRead(rightButtonPin) == HIGH) {
-    float t = map(analogRead(timeSettingKnob), 1023, 0, 1, 9);
-    float c = sqrt((X / t) + Y);
-    if ((c <= 5) && (c >= 0.2)) {
-      // Display activating message
-      displayMainMessage(F("Activating..."));
+  if (Serial.available() > 0) {
+    char cmd = Serial.read();
+    if (cmd == 'A') {
+      float t = activationTime;
+      float c = sqrt((X / t) + Y);
+      if ((c <= 5) && (c >= 0.2)) {
+        // Display activating message
+        Serial.println(F("Activation started..."));
 
-      activate(c, t);
+        activate(c, t);
 
-      // Display finished & ready to activate again
-      displayMainMessage(F("Finished Activating.Press RIGHT button to activate again."));
+        // Display finished & ready to activate again
+        Serial.println(F("Activation finished. Press right button to try again"));
 
-    } else {
-      if (c > 5) {
-        errorNum = 201; // Current too high
       } else {
-        errorNum = 202; // Current too low
+        if (c > 5) {
+          errorNum = 201; // Current too high
+        } else {
+          errorNum = 202; // Current too low
+        }
+      }
+    } else {
+      int num = (int)cmd - 48;
+      if (num > 0 && num < 10) {
+        activationTime = num;
+        Serial.println("Activation time changed to " + String(num));
+      } else {
+        Serial.println("Wrong command sent!");
       }
     }
+    
   }
 }
 
@@ -169,7 +178,7 @@ bool activate(float c, float &t) {
       rinit = r; // ensure that rinit gets the max value, and dropping is counted from that value.
     }
 
-    displaySubmainMessage(String(rinit) + "," + String(r));
+    Serial.println("Rinitial=" + String(rinit) + ", Rcurrent=" + String(r));
     // Set delay so the while loop doesn't run too fast
     delay(60);
   }
@@ -189,30 +198,25 @@ bool activate(float c, float &t) {
 }
 
 void runTests() {
-  int successfulTestCount = 0;
-  float setV = R * 3;
+  float setV = R * 5; // Multiplying by 5 to get max voltage over what current could be, ensuring that it is CC.
   if (setV > 60) {
-    displayMainMessage(F("Maximum Voltage. Be aware!"));
-    converter.write(Voltage, 60, errorNum);
-    delay(5000);
-  } else if (setV > 12) {
-    displayMainMessage(F("High Voltage. Be aware!"));
-    converter.write(Voltage, setV, errorNum);
-    delay(5000);
-  } else {
-    converter.write(Voltage, setV, errorNum);
-  }
-  if (errorNum != 0) {
-    return ;
-  }
+    setV = 60;
+  } 
+  Serial.println("Voltage is set to " + String(setV));
+  converter.write(Voltage, setV, errorNum);
+  delay(1000);
+
+  if (errorNum != 0) {return ;}
+
   float c = 0.25; // Starting current for tests
   float deltaT[2];
   float cVal[2];
   uint8_t testNum = 1;
+  int successfulTestCount = 0;
 
   while (successfulTestCount < 2) {
     // Display test num and successful test collected
-    displayMainMessage("Test #" + String(testNum) + ",Successes=" + String(successfulTestCount));
+    Serial.println("Starting Test #" + String(testNum) + ",Successes=" + String(successfulTestCount));
 
     float t = 12;
     bool success = activate(c, t);
@@ -220,6 +224,7 @@ void runTests() {
     if (success) {
       cVal[successfulTestCount] = c;
       deltaT[successfulTestCount] = t;
+      Serial.println("Success! c=" + String(c) + ", t=" + String(t));
       successfulTestCount++;
     } else if (errorNum != 0) {
       break;
@@ -230,6 +235,9 @@ void runTests() {
       errorNum = 103;
       break;
     }
+
+    Serial.println("Finished Test #" + String(testNum-1) + ",Successes=" + String(successfulTestCount));
+
     delay(40000); // 40 sec to cool down
   }
 
@@ -237,21 +245,14 @@ void runTests() {
     return;
   }
   // Calculating constants
-  //displayMainMessage("cVal1=" + String(cVal[0]) + ",cVal2=" + String(cVal[1]) + ",dt1=" + String(deltaT[0])+ ",dt2="+ String(deltaT[1]));
   X = (sq(cVal[0]) - sq(cVal[1])) / ((1 / deltaT[0]) - (1 / deltaT[1]));
   Y = sq(cVal[0]) - (X / deltaT[0]);
 
-  // Display values X and Y
-  displayMainMessage("X=" + String(X) + ",Y=" + String(Y));
-  delay(5000);
-
+  Serial.println("X=" + String(X) + ",Y=" + String(Y));
 
   testsCompleted = true;
   // Display that ready for activation
-  display.clearDisplay();
-  displayHeaderMessage(F("READY"));
-  displayMainMessage(F("Ready for activation. Press right button to activate"));
-
+  Serial.println(F("Ready for activation. Press right button to activate"));
 }
 
 void measureResistance() {
@@ -272,7 +273,7 @@ void measureResistance() {
   float Rtot = 0;
   for (int i = 0; i < 6; i++) {
     // Display round i of resistance measurement
-    displayMainMessage("Measuring Test " + String(i+1));
+    Serial.println("Measuring Test " + String(i+1));
     converter.power(true, errorNum);
     delay(200);
     float c = converter.read(Current, errorNum);
@@ -282,10 +283,10 @@ void measureResistance() {
     if (errorNum != 0) {
       break;
     }
-    displaySubmainMessage("C=" + String(c) + ",V="+ String(v));
     Rarray[i] = (v / c);
     Rtot = Rtot + (v / c);
-    delay(5000); // 15s for 5 measurements
+    Serial.println("C=" + String(c) + ",V="+ String(v) + ",R=" + String(Rarray[i]));
+    delay(5000); // 25s for 5 measurements
   }
 
   if (errorNum != 0) {
@@ -298,23 +299,29 @@ void measureResistance() {
     float devi = Rarray[i] - Ravg;
     if (devi < 0) {devi = -devi;} // Modulus
     Rdevi[i] = devi;
+
+    Serial.print("devi"+String(i+1) + "=" + String(devi) + ", ");
   }
+  Serial.println("");
   float Rdeviavg = 0;
   for (int i = 0; i < 6; i++) {
     Rdeviavg = Rdeviavg + Rdevi[i];
   }
-
   Rdeviavg = Rdeviavg / 6;
+  Serial.println("Average deviation=" + String(Rdeviavg));
   int k = 0;
   for (int i = 0; i < 6; i++) {
     if (Rdevi[i] < 2*Rdeviavg) {
       k += 1;
       R = R + Rarray[i];
+      Serial.print(String(i+1) + "=pass, ");
+    } else {
+      Serial.print(String(i+1) + "=fail, ");
     }
   }
+  Serial.println("");
   R = R / k; // Only counting the non-outliers
-  displayMainMessage("k = " + String(k));
-  delay(3000);
+  Serial.println("R="+String(R) + ",k=" + String(k));
   if (R < Rmin) {
     errorNum = 203;
     R = 0;
@@ -326,41 +333,12 @@ void measureResistance() {
   }
 
   resistanceMeasured = true;
-  // Display resistance
-  displayMainMessage("R = " + String(R));
-  delay(5000);
 
   // Display that ready for tests
-  display.clearDisplay();
-  displayHeaderMessage(F("TESTS"));
-  displayMainMessage(F("Starting tests..."));
+  Serial.println("Resistance measuments are finished, starting tests...");
 }
 
-void displayHeaderMessage(String message) {
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.fillRect(0, 0, 128, 16, BLACK);
-  display.println(message);
-  display.display();
-  delay(5);
-}
-
-void displayMainMessage(String message) {
-  display.setTextSize(1);
-  display.setCursor(0, 16);
-  display.fillRect(0, 16, 128, 48, BLACK);
-  display.println(message);
- 
-  display.display();
-  delay(5);
-}
-
-void displaySubmainMessage(String message) {
-  display.setTextSize(1);
-  display.setCursor(0, 48);
-  display.fillRect(0, 48, 128, 64, BLACK);
-  display.println(message);
- 
-  display.display();
-  delay(5);
+void SERCOM0_Handler()
+{
+    dpmSerial.IrqHandler();
 }
