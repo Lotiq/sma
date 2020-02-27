@@ -16,7 +16,7 @@ float activationTime = 1;
 bool resistanceMeasured = false;
 
 // Threshold resistance percentage change
-float Rth = 0.09;
+float Rth = 0.06;
 const float Rmin = 1.5;
 const float Rmax = 50;
 
@@ -33,24 +33,35 @@ bool errorDisp = false;
 int8_t errorNum = 0;
 // 101 - data not recieved when sending.
 // 102 - variables not set when sending
-// 103 - maximum current reached for tests.
+// 14 - maximum current reached for tests.
 // 104 - turn on reponse is not returned.
 // 201 - activation current too high.
 // 202 - activation current too low or negative, not going to work
 // 203 - resistance is too low.
 // 204 - resistance too high.
 
+  // -1 - error on begining DPM8600.
+  // -10 - error on voltage reading
+  // -11 - error on current reading.
+  // -12 - error on power reading.
+  // -13 - error on CC/CV reading.
+  // -14 - error on max current reading.
+  // -15 - error on temperature reading.
+  // -20 - wrong value sent to power writing function
+  // -21 - error setting current
+  // -22 - error setting power on/off.
+  // -23 - error setting voltage
+  // -24 - error setting current and voltage
+
 void setup() {
   Serial.begin(9600); // Serial that is used for communicating with computer
-  delay(3000);
-  delay(10);
+  while (!Serial) {;}
   pinPeripheral(5, PIO_SERCOM_ALT); // Setting up pin 5 for RX
   pinPeripheral(6, PIO_SERCOM_ALT); // Setting up pin 6 for TX
-  dpmSerial.begin(9600); // Serial that is passed for communication with DPM8605
+  dpmSerial.begin(19200); // Serial that is passed for communication with DPM8605
   delay(10);
 
-  converter.begin(dpmSerial, 3); // Starting communication with DPM8605
-  Serial.println("Connected");
+  converter.begin(dpmSerial, 3); // Starting communication with DPM8605 with 3 retries max.
   converter.write(Voltage, 2, errorNum);
   //dpmSerial.println(":01w10=1000,");
   
@@ -135,7 +146,15 @@ void readyForActivation() {
 }
 
 bool activate(float c, float &t) {
+  Serial.println("Current is set to " + String(c));
   converter.write(Current, c, errorNum);
+  float setV = R * c * 1.3; // Multiplying by 5 to get max voltage over what current could be, ensuring that it is CC.
+  if (setV > 60) {
+    setV = 60;
+  } 
+  Serial.println("Voltage is set to " + String(setV));
+  converter.write(Voltage, setV, errorNum);
+
   if (errorNum != 0) {
     return false;
   }
@@ -150,7 +169,7 @@ bool activate(float c, float &t) {
     return false;
   }
   
-  delay(150);
+  delay(500);
   // Measure voltage
   float v = converter.read(Voltage, errorNum);
 
@@ -182,6 +201,9 @@ bool activate(float c, float &t) {
     // Set delay so the while loop doesn't run too fast
     delay(60);
   }
+
+  Serial.println("CONCLUDING: Rinitial=" + String(rinit) + ", Rcurrent=" + String(r));
+  
   // Turn off the power
   converter.power(false, errorNum);
   
@@ -190,7 +212,7 @@ bool activate(float c, float &t) {
   }
 
   if (r <= rinit * (1 - Rth)) {
-    t = (millis()-timeStamp) / 1000.0;
+    t = (float)(millis()-timeStamp) / 1000.0;
     return true;
   } else {
     return false;
@@ -198,17 +220,7 @@ bool activate(float c, float &t) {
 }
 
 void runTests() {
-  float setV = R * 5; // Multiplying by 5 to get max voltage over what current could be, ensuring that it is CC.
-  if (setV > 60) {
-    setV = 60;
-  } 
-  Serial.println("Voltage is set to " + String(setV));
-  converter.write(Voltage, setV, errorNum);
-  delay(1000);
-
-  if (errorNum != 0) {return ;}
-
-  float c = 0.25; // Starting current for tests
+  float c = 0.2; // Starting current for tests
   float deltaT[2];
   float cVal[2];
   uint8_t testNum = 1;
@@ -218,7 +230,7 @@ void runTests() {
     // Display test num and successful test collected
     Serial.println("Starting Test #" + String(testNum) + ",Successes=" + String(successfulTestCount));
 
-    float t = 12;
+    float t = 10;
     bool success = activate(c, t);
 
     if (success) {
@@ -229,10 +241,14 @@ void runTests() {
     } else if (errorNum != 0) {
       break;
     }
-    c += 0.25;
+    if (success) {
+      c+= 0.05;
+    } else {
+      c += 0.1;
+    }
     testNum++;
     if (c >= 5) {
-      errorNum = 103;
+      errorNum = 14;
       break;
     }
 
@@ -262,7 +278,7 @@ void measureResistance() {
     return;
   }
 
-  converter.write(Current, 0.15, errorNum);
+  converter.write(Current, 0.1, errorNum);
   
   if (errorNum != 0) {
     R = 0;
@@ -275,7 +291,7 @@ void measureResistance() {
     // Display round i of resistance measurement
     Serial.println("Measuring Test " + String(i+1));
     converter.power(true, errorNum);
-    delay(200);
+    delay(2000);
     float c = converter.read(Current, errorNum);
     float v = converter.read(Voltage, errorNum);
 
@@ -285,7 +301,10 @@ void measureResistance() {
     }
     Rarray[i] = (v / c);
     Rtot = Rtot + (v / c);
-    Serial.println("C=" + String(c) + ",V="+ String(v) + ",R=" + String(Rarray[i]));
+    Serial.print("C=");
+    Serial.print(c, 3);
+    Serial.println(",V="+ String(v) + ",R=" + String(Rarray[i]));
+    //Serial.println("C=" + String(c) + ",V="+ String(v) + ",R=" + String(Rarray[i]));
     delay(5000); // 25s for 5 measurements
   }
 
