@@ -1,7 +1,5 @@
 #include <DPM_8600.h>
 #include "wiring_private.h"
-#define Current false
-#define Voltage true
 
 DPM_8600 converter(1);
 Uart dpmSerial (&sercom0, 5, 6, SERCOM_RX_PAD_1, UART_TX_PAD_0);
@@ -12,13 +10,19 @@ float Y = 0;
 
 // Wire Resistance
 float R = 0;
-float activationTime = 1;
+float activationTime = 3;
 bool resistanceMeasured = false;
 
 // Threshold resistance percentage change
 float Rth = 0.06;
 const float Rmin = 1.5;
 const float Rmax = 50;
+
+// Boundary values for time and current
+float cMin;
+float cMax;
+float tMin;
+float tMax;
 
 // A button which initiates everything
 bool beginMeasurements = false;
@@ -48,20 +52,15 @@ int8_t errorNum = 1;
   // -30 - too much current during tests
   // -31 - too little resistance
   // -32 - too high resistance
-  // -41 - activation current too low
-  // -42 - activation current too high
+  // -33 - no connection or too high resistance
 
 void setup() {
   Serial.begin(9600); // Serial that is used for communicating with computer
-  while (!Serial) {;}
+  while (!Serial) {;} // Wait for serial screen on the computer to be open
   pinPeripheral(5, PIO_SERCOM_ALT); // Setting up pin 5 for RX
   pinPeripheral(6, PIO_SERCOM_ALT); // Setting up pin 6 for TX
   dpmSerial.begin(19200); // Serial that is passed for communication with DPM8605
-  delay(10);
-
-  converter.begin(dpmSerial, 3); // Starting communication with DPM8605 with 3 retries max.
-  converter.write('v', 2);
-  //dpmSerial.println(":01w10=1000,");
+  errorNum = converter.begin(dpmSerial, 3); // Starting communication with DPM8605 with 3 retries max.
   
   // Ready to start measuring
   Serial.println(F("Setup is finished. Send S to begin measurements"));
@@ -69,7 +68,7 @@ void setup() {
 
 void loop() {
 
-  if (Serial.available() > 0 && !beginMeasurements) {
+  if (Serial.available() > 0 && !beginMeasurements && errorNum == 1) {
     char cmd = Serial.read();
     if (cmd == 'S') {
       beginMeasurements = true;
@@ -83,60 +82,80 @@ void loop() {
       measureResistance();
     } else if (!testsCompleted) {
       runTests();
+      displayLimits();
     } else {
       readyForActivation();
     }
   } else if (errorNum != 1) {
     if (!errorDisp) {
-      // Display error here only once
       Serial.println("Error #" + String(errorNum));
-
-      if (errorNum == -41 || errorNum == -41) {
-        Serial.println(F("Try again in 5 seconds"));
-      }
-
       errorDisp = true;
     }
-    
-    if (errorNum == -41 || errorNum == -42) {
-      errorNum = 1;
-      delay(5000);
-      Serial.println(F("Ready for activation. Press right button to activate"));
-    }
+  }
+}
+
+float currentFor(float t){
+  return sqrt((X / t) + Y);
+}
+
+float timeFor(float c){
+  return (X/(sq(c)-Y));
+}
+
+void displayLimits() {
+  cMin = currentFor(10);
+  cMax = currentFor(1);
+  tMin = 1;
+  tMax = 10;
+  if (cMin < 0.1) {
+    tMax = timeFor(0.1);
+    cMin = currentFor(tMax);
   }
 
+  if (cMax > 5) {
+    tMin = timeFor(5);
+    cMax = currentFor(tMin);
+  }
+  activationTime = timeFor(cMax - (cMax-cMin)*0.1);
+  Serial.print(F("Limits based on the equation are: fastest->"));
+  Serial.print(cMax);
+  Serial.print(F(" for "));
+  Serial.print(tMin);
+  Serial.print(F(", slowest->"));
+  Serial.print(cMin);
+  Serial.print(F(" for "));
+  Serial.println(tMax);
 }
 
 void readyForActivation() {
 
   if (Serial.available() > 0) {
-    char cmd = Serial.read();
-    if (cmd == 'A') {
+    String cmd = Serial.readStringUntil('\n');
+    if (cmd == "A") {
+
       float t = activationTime;
-      float c = sqrt((X / t) + Y);
-      if ((c <= 5) && (c >= 0.05)) {
-        // Display activating message
-        Serial.println(F("Activation started..."));
+      float c = currentFor(activationTime);
+      
+      // Display activating message
+      Serial.println(F("Activation started..."));
 
-        activate(c, t);
+      activate(c, t);
 
-        // Display finished & ready to activate again
-        Serial.println(F("Activation finished. Press right button to try again"));
+      // Display finished & ready to activate again
+      Serial.println(F("Activation finished"));
 
-      } else {
-        if (c > 5) {
-          errorNum = -42; // Current too high
-        } else {
-          errorNum = -41; // Current too low
-        }
-      }
     } else {
-      int num = (int)cmd - 48;
-      if (num > 0 && num < 10) {
-        activationTime = num;
-        Serial.println("Activation time changed to " + String(num));
+      // Read the time
+      float t = cmd.toFloat();
+
+      // Check if command is ok or time is within limit range
+      if (t < tMin || t > tMax) {
+        Serial.println(F("Outside of range time or wrong command. Try again within limits"));
       } else {
-        Serial.println("Wrong command sent!");
+        activationTime = t;
+        float c = currentFor(activationTime);
+        // Display new settings;
+        Serial.println("Activation time set to " + String(activationTime) + ", current necessary=" + String(c));
       }
     }
     
@@ -161,6 +180,7 @@ bool activate(float c, float &t) {
   converter.power(true);
   
   delay(500);
+  
   // Measure voltage
   float v = converter.read('v');
 
@@ -171,7 +191,6 @@ bool activate(float c, float &t) {
   }
 
   // Calculate Initial Resistance
-  //float rinit = (v / c);
   float rinit = R;
 
   // Set changing Resistance to Initial
@@ -180,7 +199,7 @@ bool activate(float c, float &t) {
   // Run a while loop which will only be exited if time exceeds t+1 seconds or resistance drops low enough
   while ((r > rinit * (1 - Rth)) && (millis() - timeStamp < ((t + 1) * 1000))) {
     v = converter.read('v');
-    // NEED TO IMPLEMENT ANOMALY  AND SLOPE DETECTION
+    // NEEDS SLOPE DETECTION
     if (v < 0) {
       errorNum = floor(v);
       break;
@@ -257,7 +276,7 @@ void runTests() {
 
   testsCompleted = true;
   // Display that ready for activation
-  Serial.println(F("Ready for activation. Press right button to activate"));
+  Serial.println(F("Ready for activation. Send A to active or a number to set time"));
 }
 
 void measureResistance() {
@@ -284,6 +303,9 @@ void measureResistance() {
       break;
     } else if (c < 0) {
       errorNum = floor(c);
+      break;
+    } else if (c < 0.01) {
+      errorNum = -33;
       break;
     }
     Rarray[i] = (v / c);
